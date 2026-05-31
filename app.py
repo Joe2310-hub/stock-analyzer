@@ -87,10 +87,14 @@ if not os.getenv("ANTHROPIC_API_KEY"):
     st.warning("⚠️  ANTHROPIC_API_KEY fehlt — KI-Tab wird nicht funktionieren. Kopiere `.env.example` → `.env` und trag deinen Key ein.")
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_stock_data(ticker):
+    return get_stock_data(ticker)
+
 if ticker_input and analyze:
     with st.spinner(f"Lade Daten für **{ticker_input}** …"):
         try:
-            data = get_stock_data(ticker_input)
+            data = cached_stock_data(ticker_input)
             fund = data["fundamentals"]
             hist = data["history_1y"]
             news = data["news"]
