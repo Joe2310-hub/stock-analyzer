@@ -1,4 +1,6 @@
 import math
+import time
+import requests
 import yfinance as yf
 from datetime import datetime
 
@@ -12,8 +14,30 @@ def _finite(val):
         return None
 
 
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return session
+
+
 def get_stock_data(ticker_symbol: str) -> dict:
-    ticker = yf.Ticker(ticker_symbol)
+    session = _make_session()
+    for attempt in range(3):
+        try:
+            ticker = yf.Ticker(ticker_symbol, session=session)
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
     info = ticker.info
 
     if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
