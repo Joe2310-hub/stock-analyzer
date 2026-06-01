@@ -2,6 +2,7 @@ import math
 import os
 import requests
 import pandas as pd
+import yfinance as yf
 from datetime import datetime, timedelta
 
 
@@ -57,20 +58,28 @@ def get_stock_data(ticker_symbol: str) -> dict:
     balance_raw = _get("balance-sheet-statement", {"symbol": symbol, "limit": 1})
     balance = balance_raw[0] if balance_raw else {}
 
-    # Kurshistorie
+    # Kurshistorie — FMP zuerst, yfinance als Fallback für Micro/Small Caps
+    hist_1y = None
     start = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
     end = datetime.now().strftime("%Y-%m-%d")
     hist_raw = _get("historical-price-eod/full", {"symbol": symbol, "from": start, "to": end})
-    hist_list = hist_raw if isinstance(hist_raw, list) else hist_raw.get("historical", [])
-    if not hist_list:
-        raise ValueError(f"Keine Kursdaten für '{symbol}' verfügbar.")
+    hist_list = hist_raw if isinstance(hist_raw, list) else (hist_raw.get("historical", []) if isinstance(hist_raw, dict) else [])
 
-    df = pd.DataFrame(hist_list)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index("date").sort_index()
-    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
-                             "close": "Close", "volume": "Volume"})
-    hist_1y = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    if hist_list:
+        df = pd.DataFrame(hist_list)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                 "close": "Close", "volume": "Volume"})
+        hist_1y = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    else:
+        # Fallback: yfinance für Kursdaten (zuverlässig für alle Aktien)
+        try:
+            hist_1y = yf.Ticker(symbol).history(period="1y")
+            if hist_1y.empty:
+                raise ValueError(f"Keine Kursdaten für '{symbol}' verfügbar.")
+        except Exception as e:
+            raise ValueError(f"Keine Kursdaten für '{symbol}' verfügbar.") from e
 
     # News (402 auf Free Tier → leere Liste)
     news_raw = _get("news/stock", {"symbols": symbol, "limit": 5}) or []
