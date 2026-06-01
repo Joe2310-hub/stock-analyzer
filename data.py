@@ -1,11 +1,14 @@
 import math
-import time
-import yfinance as yf
-from datetime import datetime
+import os
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+
+
+BASE_URL = "https://financialmodelingprep.com/stable"
 
 
 def _finite(val):
-    """Return val if it's a finite real number, else None."""
     try:
         v = float(val)
         return v if math.isfinite(v) else None
@@ -13,91 +16,128 @@ def _finite(val):
         return None
 
 
+def _get(endpoint: str, params: dict = None):
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        raise ValueError("FMP_API_KEY nicht gesetzt.")
+    p = {"apikey": api_key}
+    if params:
+        p.update(params)
+    resp = requests.get(f"{BASE_URL}/{endpoint}", params=p, timeout=15)
+    if resp.status_code == 429:
+        raise ValueError("API Rate Limit erreicht. Bitte später versuchen.")
+    if resp.status_code in (402, 403):
+        return []
+    if resp.status_code != 200:
+        raise ValueError(f"API Fehler {resp.status_code} für /{endpoint}")
+    return resp.json()
+
+
 def get_stock_data(ticker_symbol: str) -> dict:
-    for attempt in range(3):
+    symbol = ticker_symbol.upper()
+
+    profile_raw = _get("profile", {"symbol": symbol})
+    if not profile_raw:
+        raise ValueError(f"Ticker '{symbol}' nicht gefunden.")
+    profile = profile_raw[0]
+
+    metrics_raw = _get("key-metrics", {"symbol": symbol})
+    metrics = metrics_raw[0] if metrics_raw else {}
+
+    ratios_raw = _get("ratios", {"symbol": symbol})
+    ratios = ratios_raw[0] if ratios_raw else {}
+
+    income_raw = _get("income-statement", {"symbol": symbol, "limit": 2})
+    income = income_raw[0] if income_raw else {}
+    income_prev = income_raw[1] if len(income_raw) > 1 else {}
+
+    cashflow_raw = _get("cash-flow-statement", {"symbol": symbol, "limit": 1})
+    cashflow = cashflow_raw[0] if cashflow_raw else {}
+
+    balance_raw = _get("balance-sheet-statement", {"symbol": symbol, "limit": 1})
+    balance = balance_raw[0] if balance_raw else {}
+
+    # Kurshistorie
+    start = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+    end = datetime.now().strftime("%Y-%m-%d")
+    hist_raw = _get("historical-price-eod/full", {"symbol": symbol, "from": start, "to": end})
+    hist_list = hist_raw if isinstance(hist_raw, list) else hist_raw.get("historical", [])
+    if not hist_list:
+        raise ValueError(f"Keine Kursdaten für '{symbol}' verfügbar.")
+
+    df = pd.DataFrame(hist_list)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                             "close": "Close", "volume": "Volume"})
+    hist_1y = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+
+    # News (402 auf Free Tier → leere Liste)
+    news_raw = _get("news/stock", {"symbols": symbol, "limit": 5}) or []
+    news = []
+    for item in (news_raw or [])[:5]:
+        pub = item.get("publishedDate", "")
         try:
-            ticker = yf.Ticker(ticker_symbol)
-            _ = ticker.fast_info  # Verbindung testen
-            break
-        except Exception as e:
-            if attempt == 2:
-                raise
-            time.sleep(2 ** attempt)
-    info = ticker.info
+            pub = datetime.fromisoformat(pub.replace("Z", "+00:00")).strftime("%d.%m.%Y")
+        except Exception:
+            pub = pub[:10] if pub else ""
+        if item.get("title"):
+            news.append({"title": item["title"], "publisher": item.get("site", ""), "date": pub})
 
-    if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
-        # Try to at least get history to confirm ticker exists
-        hist = ticker.history(period="5d")
-        if hist.empty:
-            raise ValueError(f"Ticker '{ticker_symbol}' nicht gefunden.")
+    # Wachstumsraten
+    rev_cur = _finite(income.get("revenue"))
+    rev_pre = _finite(income_prev.get("revenue"))
+    revenue_growth = ((rev_cur - rev_pre) / abs(rev_pre)) if rev_cur and rev_pre else None
 
-    hist_1y = ticker.history(period="1y")
-    if hist_1y.empty:
-        raise ValueError(f"Keine Kursdaten für '{ticker_symbol}' verfügbar.")
+    ni_cur = _finite(income.get("netIncome"))
+    ni_pre = _finite(income_prev.get("netIncome"))
+    earnings_growth = ((ni_cur - ni_pre) / abs(ni_pre)) if ni_cur and ni_pre and ni_pre != 0 else None
 
-    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-    if current_price is None and not hist_1y.empty:
-        current_price = float(hist_1y["Close"].iloc[-1])
+    # 52W aus range-String "195.07-315.37" parsen
+    week_52_low, week_52_high = None, None
+    rng = profile.get("range", "")
+    if rng and "-" in str(rng):
+        parts = str(rng).split("-")
+        if len(parts) == 2:
+            week_52_low = _finite(parts[0])
+            week_52_high = _finite(parts[1])
 
     fundamentals = {
-        "company_name": info.get("longName") or ticker_symbol,
-        "sector": info.get("sector", "N/A"),
-        "industry": info.get("industry", "N/A"),
-        "current_price": current_price,
-        "market_cap": _finite(info.get("marketCap")),
+        "company_name": profile.get("companyName", symbol),
+        "sector": profile.get("sector", "N/A"),
+        "industry": profile.get("industry", "N/A"),
+        "current_price": _finite(profile.get("price")),
+        "market_cap": _finite(profile.get("marketCap")),
         # Bewertung
-        "pe_ratio": _finite(info.get("trailingPE")),
-        "forward_pe": _finite(info.get("forwardPE")),
-        "peg_ratio": _finite(info.get("pegRatio")),
-        "enterprise_value": _finite(info.get("enterpriseValue")),
+        "pe_ratio": _finite(ratios.get("priceToEarningsRatio")),
+        "forward_pe": _finite(ratios.get("priceToEarningsRatio")),
+        "peg_ratio": _finite(ratios.get("priceToEarningsGrowthRatio")),
+        "enterprise_value": _finite(metrics.get("enterpriseValue")),
         # Quality
-        "roe": _finite(info.get("returnOnEquity")),
-        "gross_margin": _finite(info.get("grossMargins")),
-        "operating_margin": _finite(info.get("operatingMargins")),
-        "profit_margin": _finite(info.get("profitMargins")),
-        "ebitda": _finite(info.get("ebitda")),
-        "ebitda_margin": _finite(info.get("ebitdaMargins")),
+        "roe": _finite(metrics.get("returnOnEquity")),
+        "gross_margin": _finite(ratios.get("grossProfitMargin")),
+        "operating_margin": _finite(ratios.get("operatingProfitMargin")),
+        "profit_margin": _finite(ratios.get("netProfitMargin")),
+        "ebitda": _finite(income.get("ebitda")),
+        "ebitda_margin": _finite(ratios.get("ebitdaMargin")),
         # Cash & Earnings
-        "free_cash_flow": _finite(info.get("freeCashflow")),
-        "net_income": _finite(info.get("netIncomeToCommon")),
-        "total_revenue": _finite(info.get("totalRevenue")),
-        "revenue_growth": _finite(info.get("revenueGrowth")),
-        "earnings_growth": _finite(info.get("earningsGrowth")),
-        "eps_trailing": _finite(info.get("trailingEps")),
-        "eps_forward": _finite(info.get("forwardEps")),
-        # Bilanz / Safety
-        "total_debt": _finite(info.get("totalDebt")),
-        "total_cash": _finite(info.get("totalCash")),
-        "debt_to_equity": _finite(info.get("debtToEquity")),
+        "free_cash_flow": _finite(cashflow.get("freeCashFlow")),
+        "net_income": _finite(income.get("netIncome")),
+        "total_revenue": _finite(income.get("revenue")),
+        "revenue_growth": _finite(revenue_growth),
+        "earnings_growth": _finite(earnings_growth),
+        "eps_trailing": _finite(ratios.get("netIncomePerShare")),
+        "eps_forward": None,
+        # Bilanz
+        "total_debt": _finite(balance.get("totalDebt")),
+        "total_cash": _finite(balance.get("cashAndCashEquivalents")),
+        "debt_to_equity": _finite(ratios.get("debtToEquityRatio")),
+        "interest_coverage": _finite(ratios.get("interestCoverageRatio")),
         # Sonstiges
-        "week_52_high": info.get("fiftyTwoWeekHigh"),
-        "week_52_low": info.get("fiftyTwoWeekLow"),
-        # Cap at 15% — yfinance occasionally returns corrupt values (e.g. 35% for AAPL)
-        "dividend_yield": dy if (dy := info.get("dividendYield")) and dy < 0.15 else None,
-        "beta": _finite(info.get("beta")),
+        "week_52_high": week_52_high,
+        "week_52_low": week_52_low,
+        "dividend_yield": _finite(ratios.get("dividendYield")),
+        "beta": _finite(profile.get("beta")),
     }
 
-    news = []
-    try:
-        raw_news = ticker.news or []
-        for item in raw_news[:5]:
-            content = item.get("content", {})
-            title = content.get("title") or item.get("title", "")
-            publisher = content.get("provider", {}).get("displayName") or item.get("publisher", "")
-            pub_time = content.get("pubDate") or ""
-            if pub_time:
-                try:
-                    dt = datetime.fromisoformat(pub_time.replace("Z", "+00:00"))
-                    pub_time = dt.strftime("%d.%m.%Y")
-                except Exception:
-                    pub_time = ""
-            if title:
-                news.append({"title": title, "publisher": publisher, "date": pub_time})
-    except Exception:
-        pass
-
-    return {
-        "fundamentals": fundamentals,
-        "history_1y": hist_1y,
-        "news": news,
-    }
+    return {"fundamentals": fundamentals, "history_1y": hist_1y, "news": news}

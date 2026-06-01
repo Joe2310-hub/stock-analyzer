@@ -211,12 +211,15 @@ def long_term_score(fund: dict, tech: dict) -> dict:
                                 "benchmark": "< 1.5x gut · > 3x Red Flag"}
 
     # ── Zinsdeckung EBIT/Zins — Safety 7% ───────────────────────────────
-    # Approximation: wenn kein Fremdkapital, volle Punkte
-    if total_debt is not None and (total_debt or 0) < 1e6:
+    ic = fund.get("interest_coverage")
+    if ic is not None:
+        s = 100 if ic >= 10 else 70 if ic >= 5 else 40 if ic >= 3 else 5
+        c["Zinsdeckung"] = {"label": f"{ic:.1f}x", "score": s, "weight": 0.07,
+                            "benchmark": "> 10x gut · < 3x Red Flag"}
+    elif total_debt is not None and (total_debt or 0) < 1e6:
         c["Zinsdeckung"] = {"label": "Kein Fremdkapital", "score": 100, "weight": 0.07,
                             "benchmark": "> 10x gut · < 3x Red Flag"}
     else:
-        # yfinance liefert Zinsaufwand nicht zuverlässig im info-dict → N/A
         c["Zinsdeckung"] = {"label": "N/A", "score": None, "weight": 0.07,
                             "benchmark": "> 10x gut · < 3x Red Flag"}
 

@@ -13,10 +13,15 @@ from sentiment import analyze_news_sentiment
 
 load_dotenv()
 
-# Streamlit Cloud: API Key aus st.secrets laden falls nicht in Umgebung
+# Streamlit Cloud: Keys aus st.secrets laden falls nicht in Umgebung
 if not os.getenv("ANTHROPIC_API_KEY"):
     try:
         os.environ["ANTHROPIC_API_KEY"] = st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        pass
+if not os.getenv("FMP_API_KEY"):
+    try:
+        os.environ["FMP_API_KEY"] = st.secrets["FMP_API_KEY"]
     except Exception:
         pass
 
